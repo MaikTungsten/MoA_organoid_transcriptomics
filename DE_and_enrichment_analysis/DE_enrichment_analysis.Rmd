@@ -1,0 +1,1134 @@
+---
+title: "Analysis_RNAseq_Organoids"
+author: "MaikTungsten"
+date: "`r Sys.Date()`"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+```{r, include=FALSE}
+library(ggplot2)
+library(tidyverse)
+library(dplyr)
+library(reshape2)
+library(stringr)
+library(ggpubr)
+library(readxl)
+library(AnnotationDbi)
+library(topGO)
+library(org.Hs.eg.db)
+library(limma)
+library(DESeq2)
+library(pheatmap)
+```
+
+# Overview
+
+The dataset encompasses two cell states - Healthy and Glioma cells - subjected to a diverse set of treatments (control, DMSO, 6 drugs) - each analysed in triplicates.
+
+# 1. Load the countsTable
+
+Load the data. Note: the data has been subjected to prior inspection, cleaning and curation in a Jupyter Notebook.
+
+```{r}
+countsLOG_in <- as.data.frame(read_csv("../post_processing_countData/Log2_normalized_countData_minus_outliers.csv"))
+countsRAW_in <- as.data.frame(read_csv("../post_processing_countData/Raw_countData_minus_outliers.csv"))
+countsTPM_in <- as.data.frame(read_csv("../post_processing_countData/TPM_normalized_countData_minus_outliers.csv"))
+
+# Example: TPM data
+head(countsTPM_in)
+```
+
+```{r}
+# Convert Geneid column to rownames
+rownames(countsTPM_in) <- countsTPM_in[,1]
+countsTPM <- countsTPM_in[,-1]
+
+rownames(countsLOG_in) <- countsLOG_in[,1]
+countsLOG <- countsLOG_in[,-1]
+
+rownames(countsRAW_in) <- countsRAW_in[,1]
+countsRAW <- countsRAW_in[,-1]
+
+head(countsTPM)
+```
+
+#### Load annotation
+
+```{r}
+anno <- as.data.frame(read_excel('../post_processing_countData/AW_RNAseq_2025.xlsx', sheet='Final_annotation'))
+rownames(anno) <- c(anno$ID)
+head(anno)
+```
+
+
+# 2. Inspect the data by PCA
+
+PCA (Principal component analysis) reduces the dimensionality of the dataset to allow for visual inspection. Thereby, we can see the shifts in gene expression between cell types and treatment, for instance.
+
+```{r}
+# Define a function for PCA
+
+pca <- function(x){
+  
+  tpm_pca <- prcomp(t(as.matrix(x)), center = TRUE, scale = TRUE)
+  
+  # Get contributions of variance of each PC
+  pc1 <- summary(tpm_pca)$importance[2,1]*100
+  pc2 <- summary(tpm_pca)$importance[2,2]*100
+  
+  # Configure dataframe for PC1 and PC2 coordinates for all samples
+  pcs_1_2 <- tpm_pca$x[,1:2]
+  pcs_1_2_sample <- data.frame(cbind(pcs_1_2, rownames(pcs_1_2)))
+  colnames(pcs_1_2_sample) <- c("PC1", "PC2", "Sample")
+  
+  # Transform coordinates to values that can be calculated with
+  pcs_1_2_sample$PC1 <- as.numeric(as.character(pcs_1_2_sample$PC1))
+  pcs_1_2_sample$PC2 <- as.numeric(as.character(pcs_1_2_sample$PC2))
+  
+  # Plot data
+  p <- ggplot(pcs_1_2_sample, aes(x = PC1, y = PC2, color = Sample))+
+    geom_point()+
+    theme_minimal()+
+    xlab(paste0("PC1 - ", pc1, " % of variance"))+
+    ylab(paste0("PC2 - ", pc2, " % of variance"))+
+    theme(legend.position = "right")
+  
+  return(p)
+}
+```
+
+```{r}
+# PCA with all samples, TPM normalised
+pca(countsTPM)
+```
+
+```{r}
+# PCA with all samples, log2 normalized
+pca(countsLOG)
+```
+
+```{r}
+# PCA with all samples, raw counts
+pca(countsRAW)
+```
+
+#### PCA with sample annotation
+
+```{r}
+# Define a function for PCA by cell state
+
+pca_by_state <- function(x, anno){
+  
+  tpm_pca <- prcomp(t(as.matrix(x)), center = TRUE, scale = TRUE)
+  
+  # Get contributions of variance of each PC
+  pc1 <- summary(tpm_pca)$importance[2,1]*100
+  pc2 <- summary(tpm_pca)$importance[2,2]*100
+  
+  # Configure dataframe for PC1 and PC2 coordinates for all samples
+  pcs_1_2 <- tpm_pca$x[,1:2]
+  sample_info <- anno[rownames(pcs_1_2),c('Cell_state', 'Treatment', 'Replicate')]
+  pcs_1_2_sample <- data.frame(cbind(pcs_1_2, rownames(pcs_1_2), sample_info))
+  colnames(pcs_1_2_sample) <- c("PC1", "PC2", "Sample", "Cell_state", "Treatment", "Replicate")
+  
+  # Transform coordinates to values that can be calculated with
+  pcs_1_2_sample$PC1 <- as.numeric(as.character(pcs_1_2_sample$PC1))
+  pcs_1_2_sample$PC2 <- as.numeric(as.character(pcs_1_2_sample$PC2))
+  
+  # Plot data
+  p <- ggplot(pcs_1_2_sample, aes(x = PC1, y = PC2, color = Cell_state))+
+    geom_point()+
+    theme_minimal()+
+    xlab(paste0("PC1 - ", pc1, " % of variance"))+
+    ylab(paste0("PC2 - ", pc2, " % of variance"))+
+    theme(legend.position = "right")
+  
+  return(p)
+}
+```
+
+Plot PCA with annotation of samples.
+
+```{r}
+pca_by_state(countsTPM, anno)
+pca_by_state(countsLOG, anno)
+pca_by_state(countsRAW, anno)
+```
+
+```{r}
+# Define a function for PCA by treatment
+
+pca_by_treatment <- function(x, anno){
+  
+  tpm_pca <- prcomp(t(as.matrix(x)), center = TRUE, scale = TRUE)
+  
+  # Get contributions of variance of each PC
+  pc1 <- summary(tpm_pca)$importance[2,1]*100
+  pc2 <- summary(tpm_pca)$importance[2,2]*100
+  
+  # Configure dataframe for PC1 and PC2 coordinates for all samples
+  pcs_1_2 <- tpm_pca$x[,1:2]
+  sample_info <- anno[rownames(pcs_1_2),c('Cell_state', 'Treatment', 'Replicate')]
+  pcs_1_2_sample <- data.frame(cbind(pcs_1_2, rownames(pcs_1_2), sample_info))
+  colnames(pcs_1_2_sample) <- c("PC1", "PC2", "Sample", "Cell_state", "Treatment", "Replicate")
+  
+  # Transform coordinates to values that can be calculated with
+  pcs_1_2_sample$PC1 <- as.numeric(as.character(pcs_1_2_sample$PC1))
+  pcs_1_2_sample$PC2 <- as.numeric(as.character(pcs_1_2_sample$PC2))
+  
+  # Plot data
+  p <- ggplot(pcs_1_2_sample, aes(x = PC1, y = PC2, color = Treatment, shape = Cell_state))+
+    geom_point()+
+    theme_minimal()+
+    xlab(paste0("PC1 - ", pc1, " % of variance"))+
+    ylab(paste0("PC2 - ", pc2, " % of variance"))+
+    theme(legend.position = "right")
+  
+  return(p)
+}
+```
+
+Plot PCA with annotation of samples.
+
+```{r}
+pca_by_treatment(countsTPM, anno)
+pca_by_treatment(countsLOG, anno)
+pca_by_treatment(countsRAW, anno)
+```
+
+# 3. Compare samples among each other by Pearson correlation
+
+```{r}
+# Pearson Correleation between samples
+res <- cor(countsTPM, method = 'pearson')
+
+anno_for_res <- anno[rownames(res), c("Cell_state", "Treatment")]
+anno_for_res
+
+pheatmap(res, annotation_row = anno_for_res, annotation_col = anno_for_res)
+```
+
+
+# 4. Plot a heatmap
+
+In a heatmap, one can visualize the overall expression of genes. Here, we filter out the 2,000 most variable genes and z-score-normalize each gene that across all samples.
+
+```{r}
+# Define function for filtering top expressing genes and plotting a heatmap
+
+heatmap_plot <- function(x, anno, a="row", f=10){
+  library(pheatmap)
+  x <- x[order(rowVars(as.matrix(x), useNames = TRUE),decreasing=TRUE),]
+  tpm_mat <- as.matrix(x)
+  rownames(tpm_mat) <- rownames(x)
+  tpm_mat_selected <- tpm_mat[1:2000,]
+  #my_hclust_gene <- hclust(dist(tpm_mat_selected), method = "complete")
+  #my_gene_col <- as.data.frame(cutree(tree = as.dendrogram(my_hclust_gene), k = f))
+  #colnames(my_gene_col) <- "Cluster"
+  anno_edit <- anno[colnames(tpm_mat_selected), c("Cell_state", "Treatment")]
+  p <- pheatmap(tpm_mat_selected, scale=a, cluster_rows = T, cluster_cols = T, show_rownames = F, annotation_col = anno_edit)
+  return(p)
+}
+
+#### z-normalize before clustering ####
+
+# Heatmap for all samples with z-score
+heatmap_plot(countsTPM, anno, "row", 10)
+heatmap_plot(countsLOG, anno, "row", 10)
+```
+
+```{r}
+# Define function for filtering top expressing genes and plotting a heatmap
+
+heatmap_plot_unscaled <- function(x, anno, f=10){
+  library(pheatmap)
+  x <- x[order(rowVars(as.matrix(x), useNames = TRUE),decreasing=TRUE),]
+  tpm_mat <- as.matrix(x)
+  rownames(tpm_mat) <- rownames(x)
+  tpm_mat_selected <- tpm_mat[1:2000,]
+  #my_hclust_gene <- hclust(dist(tpm_mat_selected), method = "complete")
+  #my_gene_col <- as.data.frame(cutree(tree = as.dendrogram(my_hclust_gene), k = f))
+  #colnames(my_gene_col) <- "Cluster"
+  anno_edit <- anno[colnames(tpm_mat_selected), c("Cell_state", "Treatment")]
+  p <- pheatmap(tpm_mat_selected, cluster_rows = T, cluster_cols = T, show_rownames = F, annotation_col = anno_edit)
+  return(p)
+}
+
+#### z-normalize before clustering ####
+
+# Heatmap for all samples without z-score
+heatmap_plot_unscaled(countsTPM, anno, 10)
+heatmap_plot_unscaled(countsLOG, anno, 10)
+```
+
+One could also extract clusters, which is not necessary at this state of analysis.
+
+```{r}
+### Extract genes from distinct clusters
+#heatmap_clusters <- function(x, f=6){ # f is number of clusters to extract
+#  library(dendextend)
+#  x <- x[order(x[,ncol(x)],decreasing=TRUE),]
+#  tpm_mat <- as.matrix(x[,3:ncol(x)])
+#  rownames(tpm_mat) <- c(x[,1])
+#  tpm_mat_selected <- tpm_mat[1:2000,]
+#  my_hclust_gene <- hclust(dist(tpm_mat_selected), method = "complete")
+#  my_gene_col <- as.data.frame(cutree(tree = as.dendrogram(my_hclust_gene), k = f))
+#  return(my_gene_col)
+#}
+
+#z <- heatmap_clusters(countsTPM, 12)
+
+```
+
+## 4.1 Gene expression in individual cell types.
+
+Now we take a look at each cell type in individual heatmaps.
+
+```{r}
+# Slightly adjusted heatmap plot, selecting for a specified cell type
+heatmap_plot <- function(x, anno, a="row", cellType){
+  anno_edit <- anno[colnames(x), c("Cell_state", "Treatment", "ID")]
+  cell_states <- c(anno_edit[which(anno_edit$Cell_state == cellType), c('ID')])
+  df <- x[,cell_states]
+  y <- df[order(rowVars(as.matrix(df), useNames = TRUE),decreasing=TRUE),order(colnames(df))]
+  tpm_mat <- as.matrix(y)
+  rownames(tpm_mat) <- rownames(y)
+  tpm_mat_selected <- tpm_mat[1:1000,]
+  anno_edit <- anno_edit[colnames(tpm_mat_selected), c("Cell_state", "Treatment")]
+  p <- pheatmap(tpm_mat_selected, scale=a, cluster_rows = T, cluster_cols = T, show_rownames = F, annotation_col = anno_edit)
+  return(p)
+}
+```
+
+### 4.1.1 Healthy cells
+```{r}
+# Healthy cell state, based on TPM
+heatmap_plot(countsTPM, anno, "row", cellType = 'Healthy')
+# Healthy cell state, based on LOG
+heatmap_plot(countsLOG, anno, "row", cellType = 'Healthy')
+```
+### 4.1.2 Glioma cells
+```{r}
+# Glioma cell state, based on TPM
+heatmap_plot(countsTPM, anno, "row", cellType = 'Glioma')
+# Glioma cell state, based on LOG
+heatmap_plot(countsLOG, anno, "row", cellType = 'Glioma')
+```
+
+
+# 5. Analysis of cell type and marker-gene expression
+
+```{r}
+# Specify cell type and genes of interest
+heatmap_plot <- function(x, anno, a="row", cellType, genes){
+  anno_edit <- anno[colnames(x), c("Cell_state", "Treatment", "ID")]
+  cell_states <- c(anno_edit[which(anno_edit$Cell_state == cellType), c('ID')])
+  df <- x[,cell_states]
+  y <- df[genes,order(colnames(df))]
+  tpm_mat <- as.matrix(y)
+  rownames(tpm_mat) <- rownames(y)
+  tpm_mat_selected <- tpm_mat
+  anno_edit <- anno[colnames(tpm_mat_selected), c("Cell_state", "Treatment")]
+  if (a %in% c("row", "col")){
+    p <- pheatmap(tpm_mat_selected, scale=a, cluster_rows = T, cluster_cols = F, annotation_col = anno_edit)
+  } else {
+    p <- pheatmap(tpm_mat_selected, cluster_rows = T, cluster_cols = F, annotation_col = anno_edit)
+  }
+  
+  return(p)
+}
+```
+
+```{r}
+heatmap_plot(countsTPM, anno, "none", cellType = "Healthy", genes = c('Xkr4', 'Rp1', 'Sox17'))
+heatmap_plot(countsTPM, anno, "none", cellType = "Glioma", genes = c('Xkr4', 'Rp1', 'Sox17'))
+heatmap_plot(countsTPM, anno, "row", cellType = "Healthy", genes = c('Xkr4', 'Rp1', 'Sox17'))
+heatmap_plot(countsTPM, anno, "row", cellType = "Glioma", genes = c('Xkr4', 'Rp1', 'Sox17'))
+```
+
+Saving plots to pdf.
+
+```{r}
+# Scaled rows (z-score)
+#pdf("2025-03_final_data_Aylin/Heatmap_CSF_CD4_zscore.pdf")
+#heatmap_plot(countsTPM, cellType = "CD4", genes = c('Csf1', 'Csf1r', 'Csf2', 'Csf2ra', 'Csf2rb', 'Csf3'))
+#dev.off()
+#png("2025-03_final_data_Aylin/Heatmap_CSF_CD4_zscore.png")
+#heatmap_plot(countsTPM, cellType = "CD4", genes = c('Csf1', 'Csf1r', 'Csf2', 'Csf2ra', 'Csf2rb', 'Csf3'))
+#dev.off()
+```
+
+
+## 5.2 Marker-gene expression plots
+
+```{r}
+# Specify a dotplot workflow
+plot_markers <- function(x, anno, cellType, genes, scale = "linear"){
+  anno_edit <- anno[colnames(x), c("Cell_state", "Treatment", "ID")]
+  cell_states <- c(anno_edit[which(anno_edit$Cell_state == cellType), c('ID')])
+  
+  # Format dataframe
+  df <- x[,cell_states]
+  y <- df[genes,order(colnames(df))]
+  y <- t(y)
+  newCols <- append(colnames(y), c('Sample', 'Treatment'))
+  y <- cbind.data.frame(y, rownames(y), c(anno_edit$Treatment), stringsAsFactors = FALSE)
+  colnames(y) <- newCols
+  
+  # Melt dataframe
+  df_melt <- melt(y, id = c("Sample", "Treatment"))
+  colnames(df_melt) <- c('Sample', 'Treatment', 'Gene', 'TPM_normalized_expression')
+  
+  # Plot data
+  if (scale == 'linear'){
+      p <- ggplot(df_melt, aes(x = Treatment, y = TPM_normalized_expression, fill = Treatment, colour = Treatment)) +
+        geom_dotplot(binaxis='y', stackdir='center', stackratio=1.5, dotsize = 0.6) +
+        facet_grid(~ Gene, switch = "x") +
+        theme_minimal()+
+        theme(panel.spacing.x = grid::unit(0, "mm"),
+            strip.placement = "outside",
+            strip.background = element_blank(),
+            axis.text.x = element_text(angle = 45, hjust = 1))+
+        stat_summary(fun.y=mean, geom="point", shape=10,
+                     size=3, color="grey")
+  } else if (scale == 'log'){
+      p <- ggplot(df_melt, aes(x = Treatment, y = TPM_normalized_expression, fill = Treatment, colour = Treatment)) +
+        geom_dotplot(binaxis='y', stackdir='center', stackratio=1.5, dotsize = 0.6) +
+        facet_grid(~ Gene, switch = "x") +
+        theme_minimal()+
+        theme(panel.spacing.x = grid::unit(0, "mm"),
+            strip.placement = "outside",
+            strip.background = element_blank(),
+            axis.text.x = element_text(angle = 45, hjust = 1))+
+        stat_summary(fun.y=mean, geom="point", shape=10,
+                     size=3, color="grey")+
+        scale_y_continuous(trans = 'log10')
+  }
+  
+
+  
+  return(p)
+}
+```
+
+### 5.2.1 Glioma markers
+```{r}
+# Mouse CD45 = Ptprc
+#p <- plot_markers(countsTPM, anno, "Glioma", c("Xkr4", "Sox17", "Rp1"), scale = "linear")
+#p
+#ggsave("2025-03_final_data_Aylin/Marker_plot_CD4.pdf", width = 30, height = 15, units = "cm")
+#ggsave("2025-03_final_data_Aylin/Marker_plot_CD4.png", width = 24, height = 12, units = "cm")
+```
+
+```{r}
+# Log 10 scale
+#p <- plot_markers(countsTPM, anno, "Glioma", c("Xkr4", "Sox17", "Rp1"), scale = "log")
+#p
+#ggsave("2025-03_final_data_Aylin/Marker_plot_CD4_log.pdf", width = 30, height = 15, units = "cm")
+#ggsave("2025-03_final_data_Aylin/Marker_plot_CD4_log.png", width = 24, height = 12, units = "cm")
+```
+
+
+## 5.3 Analysis of specific pathways / GO's
+
+```{r}
+# Specify cell type and genes of interest
+heatmap_plot <- function(x, anno, a="row", cellType, genes){
+  
+  anno_edit <- anno[colnames(x), c("Cell_state", "Treatment", "ID")]
+  cell_states <- c(anno_edit[which(anno_edit$Cell_state == cellType), c('ID')])
+  
+  # Format dataframe
+  df <- x[,cell_states]
+  match_genes <- genes[which(genes %in% rownames(x))]
+  y <- df[match_genes,order(colnames(df))]
+  tpm_mat <- as.matrix(y)
+  rownames(tpm_mat) <- rownames(y)
+  tpm_mat_selected <- tpm_mat
+  anno_edit <- anno[colnames(tpm_mat_selected), c("Cell_state", "Treatment")]
+  p <- pheatmap(tpm_mat_selected, scale=a, cluster_rows = T, cluster_cols = F, annotation_col = anno_edit)
+  return(p)
+}
+```
+
+### 5.3.1 Selected genes from gene sets for CD4 T cells
+
+Synapse pruning and organization
+```{r}
+# Healthy cells
+heatmap_plot(countsTPM, anno, "row", cellType = "Healthy", genes = c('Adgrb3', 'C1ql1', 'Cd47', 'Cdk5', 'Epha4', 'Itgb1', 'Ngef', 'Plxnc1', 'Sarm1', 'Trem2', 'Vangl2'))
+heatmap_plot(countsTPM, anno, "none", cellType = "Healthy", genes = c('Adgrb3', 'C1ql1', 'Cd47', 'Cdk5', 'Epha4', 'Itgb1', 'Ngef', 'Plxnc1', 'Sarm1', 'Trem2', 'Vangl2'))
+heatmap_plot(countsLOG, anno, "row", cellType = "Healthy", genes = c('Adgrb3', 'C1ql1', 'Cd47', 'Cdk5', 'Epha4', 'Itgb1', 'Ngef', 'Plxnc1', 'Sarm1', 'Trem2', 'Vangl2'))
+heatmap_plot(countsLOG, anno, "none", cellType = "Healthy", genes = c('Adgrb3', 'C1ql1', 'Cd47', 'Cdk5', 'Epha4', 'Itgb1', 'Ngef', 'Plxnc1', 'Sarm1', 'Trem2', 'Vangl2'))
+```
+
+```{r}
+# Glioma cells
+heatmap_plot(countsTPM, anno, "row", cellType = "Glioma", genes = c('Adgrb3', 'C1ql1', 'Cd47', 'Cdk5', 'Epha4', 'Itgb1', 'Ngef', 'Plxnc1', 'Sarm1', 'Trem2', 'Vangl2'))
+heatmap_plot(countsTPM, anno, "none", cellType = "Glioma", genes = c('Adgrb3', 'C1ql1', 'Cd47', 'Cdk5', 'Epha4', 'Itgb1', 'Ngef', 'Plxnc1', 'Sarm1', 'Trem2', 'Vangl2'))
+heatmap_plot(countsLOG, anno, "row", cellType = "Glioma", genes = c('Adgrb3', 'C1ql1', 'Cd47', 'Cdk5', 'Epha4', 'Itgb1', 'Ngef', 'Plxnc1', 'Sarm1', 'Trem2', 'Vangl2'))
+heatmap_plot(countsLOG, anno, "none", cellType = "Glioma", genes = c('Adgrb3', 'C1ql1', 'Cd47', 'Cdk5', 'Epha4', 'Itgb1', 'Ngef', 'Plxnc1', 'Sarm1', 'Trem2', 'Vangl2'))
+```
+
+Neuroinflammatory response
+```{r}
+# Healthy cells
+heatmap_plot(countsTPM, anno, "row", cellType = "Healthy", genes = c('Cd200', 'Cd200l1', 'Cd200l2', 'Cd200r1', 'Cst7', 'Grn', 'Ifnb1', 'Igf1', 'Ldlr', 'Nr1d1', 'Pparg', 'Syt11', 'Tafa3', 'Tnfrsf1b', 'Trem2'))
+heatmap_plot(countsTPM, anno, "none", cellType = "Healthy", genes = c('Cd200', 'Cd200l1', 'Cd200l2', 'Cd200r1', 'Cst7', 'Grn', 'Ifnb1', 'Igf1', 'Ldlr', 'Nr1d1', 'Pparg', 'Syt11', 'Tafa3', 'Tnfrsf1b', 'Trem2'))
+heatmap_plot(countsLOG, anno, "row", cellType = "Healthy", genes = c('Cd200', 'Cd200l1', 'Cd200l2', 'Cd200r1', 'Cst7', 'Grn', 'Ifnb1', 'Igf1', 'Ldlr', 'Nr1d1', 'Pparg', 'Syt11', 'Tafa3', 'Tnfrsf1b', 'Trem2'))
+heatmap_plot(countsLOG, anno, "none", cellType = "Healthy", genes = c('Cd200', 'Cd200l1', 'Cd200l2', 'Cd200r1', 'Cst7', 'Grn', 'Ifnb1', 'Igf1', 'Ldlr', 'Nr1d1', 'Pparg', 'Syt11', 'Tafa3', 'Tnfrsf1b', 'Trem2'))
+```
+
+```{r}
+# Glioma cells
+heatmap_plot(countsTPM, anno, "row", cellType = "Glioma", genes = c('Cd200', 'Cd200l1', 'Cd200l2', 'Cd200r1', 'Cst7', 'Grn', 'Ifnb1', 'Igf1', 'Ldlr', 'Nr1d1', 'Pparg', 'Syt11', 'Tafa3', 'Tnfrsf1b', 'Trem2'))
+heatmap_plot(countsTPM, anno, "none", cellType = "Glioma", genes = c('Cd200', 'Cd200l1', 'Cd200l2', 'Cd200r1', 'Cst7', 'Grn', 'Ifnb1', 'Igf1', 'Ldlr', 'Nr1d1', 'Pparg', 'Syt11', 'Tafa3', 'Tnfrsf1b', 'Trem2'))
+heatmap_plot(countsLOG, anno, "row", cellType = "Glioma", genes = c('Cd200', 'Cd200l1', 'Cd200l2', 'Cd200r1', 'Cst7', 'Grn', 'Ifnb1', 'Igf1', 'Ldlr', 'Nr1d1', 'Pparg', 'Syt11', 'Tafa3', 'Tnfrsf1b', 'Trem2'))
+heatmap_plot(countsLOG, anno, "none", cellType = "Glioma", genes = c('Cd200', 'Cd200l1', 'Cd200l2', 'Cd200r1', 'Cst7', 'Grn', 'Ifnb1', 'Igf1', 'Ldlr', 'Nr1d1', 'Pparg', 'Syt11', 'Tafa3', 'Tnfrsf1b', 'Trem2'))
+```
+
+
+# 6. DE analysis
+
+DESeq2 for identification of DE genes between conditions (for each cell type, compare treatements with each other). More info given in https://bioconductor.org/packages/3.21/bioc/vignettes/DESeq2/inst/doc/DESeq2.html#countmat.
+
+Import the coldata that annotates the samples (colnames) and make sure they are in same order as in raw counts (only raw counts may be put into DESeq2).
+
+DESeq analysis will be performed for each cell type individually here.
+
+```{r}
+coldata <- anno
+coldata <- coldata[colnames(countsRAW),]
+coldata$Treatment <- factor(coldata$Treatment)
+coldata$Cell_state <- factor(coldata$Cell_state)
+coldata$Replicate <- factor(coldata$Replicate)
+head(coldata)
+dim(coldata)
+```
+Raw counts will be used for DE analysis.
+
+```{r}
+head(countsRAW)
+```
+
+## 6.1 DE objects for distinct cell states
+
+Function to get results for specific contrasts (comparisons), plot MAplot and get list of DEgenes between conditions.
+
+```{r}
+getDEanalysis <- function(dds, comparison, countData, coldata){
+  res <- results(dds, contrast = comparison, alpha = 0.05) # significance threshold for adjusted p-value of 5 %
+  plotMA(res, ylim = c(-8,8), main = paste0(comparison[2],"_vs_",comparison[3]))
+  summary(res)
+  print(paste0("Significant DE genes at adjusted p-value of 0.05: ", sum(res$padj < 0.05, na.rm=TRUE)))
+  resOrdered <- res[order(res$padj),]
+  resSig <- subset(resOrdered, padj < 0.05)
+  df <- countData[rownames(resSig),order(colnames(countData))]
+  anno <- coldata[colnames(df), c("Cell_state", "Treatment")]
+  if ((length(rownames(resSig)) < 30) & (length(rownames(resSig)) > 1)){
+    pheatmap(df, cluster_cols = FALSE, scale = "row", cluster_rows = TRUE, annotation_col = anno)
+  } else if (length(rownames(resSig)) >= 30) {
+    pheatmap(df, cluster_cols = FALSE, scale = "row", cluster_rows = TRUE, show_rownames = FALSE, annotation_col = anno)
+  }
+  
+  return(resSig)
+}
+```
+
+Function to perform a comprehensive DE and enrichment analysis 
+
+```{r}
+getDEanalysisFull <- function(dds, comparison, countData, coldata, ontology = "BP",
+                              nTopGO = 15) {
+
+  library(topGO)
+  library(org.Mm.eg.db)
+  library(AnnotationDbi)
+  library(ggplot2)
+  library(pheatmap)
+
+  ## ──────────────────────────────────────────────
+  ## Differential expression
+  ## ──────────────────────────────────────────────
+  res <- results(dds, contrast = comparison, alpha = 0.05)
+  resOrdered <- res[order(res$padj),]
+  resSig <- subset(resOrdered, padj < 0.05)
+
+  message("Significant DE genes (padj < 0.05): ", nrow(resSig))
+
+  ## Volcano plot
+  res_df <- as.data.frame(res)
+  res_df$gene <- rownames(res_df)
+  res_df$neglog10padj <- -log10(res_df$padj)
+  res_df$sig <- ifelse(res_df$padj < 0.05, "Significant", "Not significant")
+
+  volcano_plot <- ggplot(res_df, aes(x = log2FoldChange, y = neglog10padj, color = sig)) +
+    geom_point(alpha=0.7) +
+    scale_color_manual(values = c("grey", "#D55E00")) +
+    labs(title="Volcano Plot", x="log2 Fold Change", y="-log10(adjusted p)") +
+    theme_bw()
+
+  ## ──────────────────────────────────────────────
+  ## Split into over- and under-expressed sets
+  ## ──────────────────────────────────────────────
+  res_over  <- subset(resSig, log2FoldChange > 0)
+  res_under <- subset(resSig, log2FoldChange < 0)
+
+  message("Over-expressed genes: ", nrow(res_over))
+  message("Under-expressed genes: ", nrow(res_under))
+
+  ## Helper function to perform topGO and generate plots
+  run_topGO <- function(sigGenes, universeGenes, label) {
+
+    if (length(sigGenes) < 5) {
+      message("Skipping topGO for ", label, " — not enough significant genes.")
+      return(list(results=NULL, bar=NULL, dot=NULL))
+    }
+
+    geneList <- factor(as.integer(universeGenes %in% sigGenes))
+    names(geneList) <- universeGenes
+
+    geneID2GO <- annFUN.org(
+      whichOnto = ontology,
+      feasibleGenes = universeGenes,
+      mapping = "org.Mm.eg.db",
+      ID = "SYMBOL"
+    )
+
+    GOdata <- new("topGOdata",
+                  ontology = ontology,
+                  allGenes = geneList,
+                  annot = annFUN.GO2genes,
+                  GO2genes = geneID2GO,
+                  nodeSize = 5)
+
+    resultFisher <- runTest(GOdata, algorithm="weight01", statistic="fisher")
+
+    goRes <- GenTable(GOdata,
+                      Fisher = resultFisher,
+                      orderBy = "Fisher",
+                      topNodes = length(score(resultFisher)))
+    goRes$Fisher <- as.numeric(goRes$Fisher)
+    goRes <- goRes[goRes$Fisher < 0.05, ]
+
+    if (nrow(goRes) == 0) {
+      message("No GO terms enriched for ", label)
+      return(list(results=goRes, bar=NULL, dot=NULL))
+    }
+
+    ## Select top N
+    topN <- min(nTopGO, nrow(goRes))
+    goTop <- goRes[1:topN, ]
+    goTop$Term <- factor(goTop$Term, levels = rev(goTop$Term))
+
+    ## Bar plot
+    barplot <- ggplot(goTop, aes(x = Term, y = -log10(Fisher))) +
+      geom_bar(stat="identity", fill="#0072B2") +
+      coord_flip() +
+      labs(title=paste("Top", topN, ontology, "GO Terms —", label),
+           y="-log10(p-value)", x="") +
+      theme_bw()
+
+    ## Dot plot
+    dotplot <- ggplot(goTop, aes(x = -log10(Fisher), y = Term)) +
+      geom_point(size=4, color="#D55E00") +
+      labs(title=paste("GO Enrichment Dotplot —", label),
+           x="-log10(p-value)", y="") +
+      theme_bw()
+
+    return(list(results=goRes, bar=barplot, dot=dotplot))
+  }
+
+  universe <- rownames(res)
+
+  ## Run GO for over- and under-expressed genes
+  GO_over  <- run_topGO(rownames(res_over), universe, "Over-expressed")
+  GO_under <- run_topGO(rownames(res_under), universe, "Under-expressed")
+
+  ## Return everything
+  return(list(
+    DEgenes_over   = res_over,
+    DEgenes_under  = res_under,
+    GOresults_over = GO_over$results,
+    GOresults_under = GO_under$results,
+    GOplots = list(
+      over = list(bar = GO_over$bar, dot = GO_over$dot),
+      under = list(bar = GO_under$bar, dot = GO_under$dot)
+    ),
+    Volcanoplot = volcano_plot
+  ))
+}
+
+```
+
+Function to subset data to dataframe (tissue and treatments of interest) for creation of DESeq object
+
+```{r}
+getDEresults <- function(df, coldata, tissue, treatment){
+
+  df_select <- countsRAW[,which(coldata$Cell_state == "Healthy")]
+
+  coldata_select <- coldata[colnames(df_select),c("Cell_state", "Treatment", "Replicate")]
+  coldata_select <- coldata_select %>% filter(Treatment %in% c("DMSO", treatment))
+
+  coldata_select$Treatment <- factor(coldata_select$Treatment, levels = c("DMSO", treatment))
+  coldata_select$Cell_state <- factor(coldata_select$Cell_state)
+  coldata_select$Replicate <- factor(coldata_select$Replicate)
+
+  df_select <- df_select[,rownames(coldata_select)]
+
+  dds <- DESeqDataSetFromMatrix(countData = df_select,
+                              colData = coldata_select,
+                              design = ~ Treatment)
+
+  dds <- DESeq(dds) # perform DESeq estimations
+  resultsNames(dds) # Result names in DESeq object
+
+  return(list(dds=dds, coldata_select=coldata_select, df_select=df_select))
+
+
+}
+```
+
+## 6.1.1 DESeq analysis for Healthy tissue
+
+```{r}
+for (treatment in c("AUF", "TMZ")){
+
+  dds_results <- getDEresults(countsRAW, coldata, "Healthy", treatment)
+  contrast <- c("Treatment", treatment, "DMSO")
+  sig <- getDEanalysis(dds_results$dds, contrast, dds_results$df_select, dds_results$coldata_select)
+  if (nrow(sig) > 0) {
+    sig_new <- getDEanalysisFull(dds_results$dds, contrast, dds_results$df_select, dds_results$coldata_select)
+    print(sig_new$Volcanoplot)
+    print(sig_new$GOplots$over$bar)
+    print(sig_new$GOplots$over$dot)
+    print(sig_new$GOplots$under$bar)
+    print(sig_new$GOplots$under$dot)
+  }
+  
+}
+```
+
+
+## 6.1.2 DESeq analysis for Glioma tissue
+
+```{r}
+for (treatment in c("AUF", "TMZ")){
+
+  dds_results <- getDEresults(countsRAW, coldata, "Glioma", treatment)
+  contrast <- c("Treatment", treatment, "DMSO")
+  sig <- getDEanalysis(dds_results$dds, contrast, dds_results$df_select, dds_results$coldata_select)
+  if (nrow(sig) > 0) {
+    sig_new <- getDEanalysisFull(dds_results$dds, contrast, dds_results$df_select, dds_results$coldata_select)
+    print(sig_new$Volcanoplot)
+    print(sig_new$GOplots$over$bar)
+    print(sig_new$GOplots$over$dot)
+    print(sig_new$GOplots$under$bar)
+    print(sig_new$GOplots$under$dot)
+  }
+  
+}
+```
+
+
+
+## 6.2 Use best/largest DE sets and plot heatmaps ####TODO
+Plot heatmaps for a specific cell type using DE genes from another to better identify patterns in the data.
+
+```{r}
+refined_heatmap <- function(sig, cellType, countData){
+  cols <- grep(cellType, colnames(countData))
+  
+  df <- countData[rownames(sig),cols]
+  df <- df[,order(colnames(df))]
+  
+  if ((length(rownames(df)) < 30) & (length(rownames(df)) > 1)){
+    pheatmap(df, scale = "row", cluster_cols = FALSE, cluster_rows = TRUE)
+  } else if (length(rownames(df)) >= 30) {
+    pheatmap(df, scale = "row", cluster_cols = FALSE, cluster_rows = TRUE, show_rownames = FALSE)
+  }
+}
+
+```
+
+
+## 6.3 Use best/largest DE sets and plot heatmaps
+Plot heatmaps for a specific cell type using DE genes from another to better identify patterns in the data.
+
+```{r}
+all_DE_heatmap <- function(sig, cellType, countData, scaling){
+  cols <- grep(cellType, colnames(countData))
+  
+  df <- countData[sig,cols]
+  df <- df[,order(colnames(df))]
+  
+  pheatmap(df, scale = scaling, cluster_cols = FALSE, cluster_rows = TRUE, show_rownames = FALSE)
+}
+
+```
+
+# 7 Gene set-based analysis
+
+## Selected ssGSEA
+
+```{r}
+library(GSVA)
+library(GSA)
+library(GSEABase)
+
+# Define function for ssGSEA analysis
+ssGSEA_select <- function(df, GS, keywords = c()){
+  
+  # Select specific gene sets based on pattern search
+  GSnames <- names(GS)
+  GS_selectNames <- c()
+  for (keyword in keywords) {
+    hitNames <- names(GS[str_detect(GSnames, keyword)])
+    GS_selectNames <- append(GS_selectNames, hitNames)
+  }
+  GS_selectNames <- unique(GS_selectNames)
+  GS_filtered <- GS[GS_selectNames]
+  
+  # Extract expression counts as matrix and perform ssGSEA
+  expr_mat <- as.matrix(df)
+  #params <- gsvaParam(expr_mat, GS_filtered, maxDiff=FALSE)
+  if (length(GS_selectNames) > 0){
+    a <- gsva(ssgseaParam(expr_mat, GS_filtered))
+    return(a)   
+  } else {
+    a <- "EMPTY"
+    return(a)
+  }
+
+}
+
+# Define function for ssGSEA analysis
+ssGSEA <- function(df, MyGeneSet){
+  
+  # Select specific gene sets based on pattern search
+  GSnames <- names(GS)
+  GS_filtered <- GS
+  
+  # Extract expression counts as matrix and perform ssGSEA
+  expr_mat <- as.matrix(df)
+  #params <- gsvaParam(expr_mat, GS_filtered, maxDiff=FALSE)
+  if (length(GSnames) > 0){
+    a <- gsva(ssgseaParam(expr_mat, GS_filtered))
+    return(a)   
+  } else {
+    a <- "EMPTY"
+    return(a)
+  }
+}
+```
+
+```{r}
+# Define heatmap function for plotting ssGSEA output
+# x = ssGSEA input, n = number of GeneSets per heatmap
+ssgsea_heatmap <- function(x, anno, n=25, rownames=TRUE){
+  library(pheatmap)
+  y <- nrow(x)
+  anno <- anno[,c("Treatment", "Cell_state")]
+  df <- as.matrix(x)
+  p <- list()
+  i <- 1
+  j <- 1
+  while (i<=y){
+    if ((y-(i+n-1))>0){
+      p[[j]] <- pheatmap(df[i:(i+n-1),], cluster_cols = F, cluster_rows = F, show_rownames = rownames, annotation_col = anno)[[4]]
+      i <- i+n
+      j <- j+1
+    } else if ((i+n) > y){
+      p[[j]] <- pheatmap(df[i:y,], cluster_cols = F, cluster_rows = F, show_rownames = rownames, annotation_col = anno)[[4]]
+      i <- i+n
+      j <- j+1
+    }
+  }
+  return(p)
+}
+```
+
+#### Molecular Hallmark GeneSets
+
+```{r, results='hide'}
+cellType <- "Healthy"
+df <- countsTPM
+new_anno <- anno[colnames(df),]
+new_anno <- new_anno[which(new_anno$Cell_state == cellType),]
+df <- df[,rownames(new_anno)]
+df <- df[,order(colnames(df))]
+new_anno <- new_anno[colnames(df),]
+MyGeneSet <- "../../Analysis_R/Mouse_Hallmark_GS.symbols.gmt.txt"
+# Load GeneSets
+GS <- GSA.read.gmt(MyGeneSet)
+GS <- setNames(GS$genesets, GS$geneset.names)
+GS <- lapply(GS, function(x) x[x!= ""])
+```
+
+```{r, fig.margin=TRUE}
+#word <- c("SYNAPSE_PRUNING", "SYNAPSE_ORGANIZATION", "MICROGLIAL_CELL_ACTIVATION")
+#x <- ssGSEA_select(df, GS, word)
+#png("2025-03_final_data_Aylin/Heatmap_BPs_MDM.png")
+x <- ssGSEA(df, GS)
+ssgsea_heatmap(x, new_anno, rownames = TRUE)
+#dev.off()
+```
+
+```{r, fig.margin=TRUE}
+cellType <- "Glioma"
+df <- countsTPM
+new_anno <- anno[colnames(df),]
+new_anno <- new_anno[which(new_anno$Cell_state == cellType),]
+df <- df[,rownames(new_anno)]
+df <- df[,order(colnames(df))]
+new_anno <- new_anno[colnames(df),]
+x <- ssGSEA(df, GS)
+ssgsea_heatmap(x, new_anno, rownames = TRUE)
+```
+
+Also test with LOG normalized data instead of TPM data.
+
+```{r, results='hide'}
+cellType <- "Healthy"
+df <- countsLOG
+new_anno <- anno[colnames(df),]
+new_anno <- new_anno[which(new_anno$Cell_state == cellType),]
+df <- df[,rownames(new_anno)]
+df <- df[,order(colnames(df))]
+new_anno <- new_anno[colnames(df),]
+MyGeneSet <- "../../Analysis_R/Mouse_Hallmark_GS.symbols.gmt.txt"
+# Load GeneSets
+GS <- GSA.read.gmt(MyGeneSet)
+GS <- setNames(GS$genesets, GS$geneset.names)
+GS <- lapply(GS, function(x) x[x!= ""])
+```
+
+```{r, fig.margin=TRUE}
+#word <- c("SYNAPSE_PRUNING", "SYNAPSE_ORGANIZATION", "MICROGLIAL_CELL_ACTIVATION")
+#x <- ssGSEA_select(df, GS, word)
+#png("2025-03_final_data_Aylin/Heatmap_BPs_MDM.png")
+x <- ssGSEA(df, GS)
+ssgsea_heatmap(x, new_anno, rownames = TRUE)
+#dev.off()
+```
+
+```{r, fig.margin=TRUE}
+cellType <- "Glioma"
+df <- countsLOG
+new_anno <- anno[colnames(df),]
+new_anno <- new_anno[which(new_anno$Cell_state == cellType),]
+df <- df[,rownames(new_anno)]
+df <- df[,order(colnames(df))]
+new_anno <- new_anno[colnames(df),]
+x <- ssGSEA(df, GS)
+ssgsea_heatmap(x, new_anno, rownames = TRUE)
+```
+
+Also test with RAW count data instead of TPM data.
+
+```{r, results='hide'}
+cellType <- "Healthy"
+df <- countsRAW
+new_anno <- anno[colnames(df),]
+new_anno <- new_anno[which(new_anno$Cell_state == cellType),]
+df <- df[,rownames(new_anno)]
+df <- df[,order(colnames(df))]
+new_anno <- new_anno[colnames(df),]
+MyGeneSet <- "../../Analysis_R/Mouse_Hallmark_GS.symbols.gmt.txt"
+# Load GeneSets
+GS <- GSA.read.gmt(MyGeneSet)
+GS <- setNames(GS$genesets, GS$geneset.names)
+GS <- lapply(GS, function(x) x[x!= ""])
+```
+
+```{r, fig.margin=TRUE}
+#word <- c("SYNAPSE_PRUNING", "SYNAPSE_ORGANIZATION", "MICROGLIAL_CELL_ACTIVATION")
+#x <- ssGSEA_select(df, GS, word)
+#png("2025-03_final_data_Aylin/Heatmap_BPs_MDM.png")
+x <- ssGSEA(df, GS)
+ssgsea_heatmap(x, new_anno, rownames = TRUE)
+#dev.off()
+```
+
+```{r, fig.margin=TRUE}
+cellType <- "Glioma"
+df <- countsRAW
+new_anno <- anno[colnames(df),]
+new_anno <- new_anno[which(new_anno$Cell_state == cellType),]
+df <- df[,rownames(new_anno)]
+df <- df[,order(colnames(df))]
+new_anno <- new_anno[colnames(df),]
+x <- ssGSEA(df, GS)
+ssgsea_heatmap(x, new_anno, rownames = TRUE)
+```
+
+CONCLUSION: LOG and TPM normalization seem to yield similar scores per GS.
+
+
+#### Molecular Tumor Phenotype GeneSets
+
+```{r, fig.margin=TRUE}
+cellType <- "Healthy"
+df <- countsTPM
+new_anno <- anno[colnames(df),]
+new_anno <- new_anno[which(new_anno$Cell_state == cellType),]
+df <- df[,rownames(new_anno)]
+df <- df[,order(colnames(df))]
+new_anno <- new_anno[colnames(df),]
+MyGeneSet <- "../../Analysis_R/Mouse_tumor_phenotype_GS.symbols.gmt.txt"
+# Load GeneSets
+GS <- GSA.read.gmt(MyGeneSet)
+GS <- setNames(GS$genesets, GS$geneset.names)
+GS <- lapply(GS, function(x) x[x!= ""])
+x <- ssGSEA(df, GS)
+ssgsea_heatmap(x, new_anno, rownames = TRUE)
+```
+
+```{r, fig.margin=TRUE}
+cellType <- "Glioma"
+df <- countsTPM
+new_anno <- anno[colnames(df),]
+new_anno <- new_anno[which(new_anno$Cell_state == cellType),]
+df <- df[,rownames(new_anno)]
+df <- df[,order(colnames(df))]
+new_anno <- new_anno[colnames(df),]
+x <- ssGSEA(df, GS)
+ssgsea_heatmap(x, new_anno, rownames = TRUE)
+```
+
+
+#### Mouse Positional (chromosome-specific) GeneSets
+
+```{r, fig.margin=TRUE}
+cellType <- "Healthy"
+df <- countsTPM
+new_anno <- anno[colnames(df),]
+new_anno <- new_anno[which(new_anno$Cell_state == cellType),]
+df <- df[,rownames(new_anno)]
+df <- df[,order(colnames(df))]
+new_anno <- new_anno[colnames(df),]
+MyGeneSet <- "../../Analysis_R/Mouse_Positional_GS.symbols.gmt.txt"
+# Load GeneSets
+GS <- GSA.read.gmt(MyGeneSet)
+GS <- setNames(GS$genesets, GS$geneset.names)
+GS <- lapply(GS, function(x) x[x!= ""])
+x <- ssGSEA(df, GS)
+ssgsea_heatmap(x, new_anno, rownames = TRUE)
+```
+
+```{r, fig.margin=TRUE}
+cellType <- "Glioma"
+df <- countsTPM
+new_anno <- anno[colnames(df),]
+new_anno <- new_anno[which(new_anno$Cell_state == cellType),]
+df <- df[,rownames(new_anno)]
+df <- df[,order(colnames(df))]
+new_anno <- new_anno[colnames(df),]
+x <- ssGSEA(df, GS)
+ssgsea_heatmap(x, new_anno, rownames = TRUE)
+```
+
+
+#### Mouse Cell Type Signature GeneSets
+
+```{r, fig.margin=TRUE}
+cellType <- "Healthy"
+df <- countsTPM
+new_anno <- anno[colnames(df),]
+new_anno <- new_anno[which(new_anno$Cell_state == cellType),]
+df <- df[,rownames(new_anno)]
+df <- df[,order(colnames(df))]
+new_anno <- new_anno[colnames(df),]
+MyGeneSet <- "../../Analysis_R/Mouse_cell_type_signature_GS.symbols.gmt.txt"
+# Load GeneSets
+GS <- GSA.read.gmt(MyGeneSet)
+GS <- setNames(GS$genesets, GS$geneset.names)
+GS <- lapply(GS, function(x) x[x!= ""])
+x <- ssGSEA(df, GS)
+ssgsea_heatmap(x, new_anno, rownames = TRUE)
+```
+
+```{r, fig.margin=TRUE}
+cellType <- "Glioma"
+df <- countsTPM
+new_anno <- anno[colnames(df),]
+new_anno <- new_anno[which(new_anno$Cell_state == cellType),]
+df <- df[,rownames(new_anno)]
+df <- df[,order(colnames(df))]
+new_anno <- new_anno[colnames(df),]
+x <- ssGSEA(df, GS)
+ssgsea_heatmap(x, new_anno, rownames = TRUE)
+```
+
+
+#### Mouse Cell Type Signature GeneSets
+
+```{r, fig.margin=TRUE}
+cellType <- "Healthy"
+df <- countsTPM
+new_anno <- anno[colnames(df),]
+new_anno <- new_anno[which(new_anno$Cell_state == cellType),]
+df <- df[,rownames(new_anno)]
+df <- df[,order(colnames(df))]
+new_anno <- new_anno[colnames(df),]
+MyGeneSet <- "../../Analysis_R/Mouse_cell_type_signature_GS.symbols.gmt.txt"
+# Load GeneSets
+GS <- GSA.read.gmt(MyGeneSet)
+GS <- setNames(GS$genesets, GS$geneset.names)
+GS <- lapply(GS, function(x) x[x!= ""])
+x <- ssGSEA(df, GS)
+ssgsea_heatmap(x, new_anno, rownames = TRUE)
+```
+
+```{r, fig.margin=TRUE}
+cellType <- "Glioma"
+df <- countsTPM
+new_anno <- anno[colnames(df),]
+new_anno <- new_anno[which(new_anno$Cell_state == cellType),]
+df <- df[,rownames(new_anno)]
+df <- df[,order(colnames(df))]
+new_anno <- new_anno[colnames(df),]
+x <- ssGSEA(df, GS)
+ssgsea_heatmap(x, new_anno, rownames = TRUE)
+```
+
+
+#### Mouse BioCarta Canonical Pathways GeneSets
+
+```{r, fig.margin=TRUE}
+cellType <- "Healthy"
+df <- countsTPM
+new_anno <- anno[colnames(df),]
+new_anno <- new_anno[which(new_anno$Cell_state == cellType),]
+df <- df[,rownames(new_anno)]
+df <- df[,order(colnames(df))]
+new_anno <- new_anno[colnames(df),]
+MyGeneSet <- "../../Analysis_R/Mouse_BioCarta_canonical_pathways_GS.symbols.gmt.txt"
+# Load GeneSets
+GS <- GSA.read.gmt(MyGeneSet)
+GS <- setNames(GS$genesets, GS$geneset.names)
+GS <- lapply(GS, function(x) x[x!= ""])
+x <- ssGSEA(df, GS)
+#ssgsea_heatmap(x, new_anno, rownames = TRUE)
+```
+
+```{r, fig.margin=TRUE}
+cellType <- "Glioma"
+df <- countsTPM
+new_anno <- anno[colnames(df),]
+new_anno <- new_anno[which(new_anno$Cell_state == cellType),]
+df <- df[,rownames(new_anno)]
+df <- df[,order(colnames(df))]
+new_anno <- new_anno[colnames(df),]
+x <- ssGSEA(df, GS)
+#ssgsea_heatmap(x, new_anno, rownames = TRUE)
+```
+
+
