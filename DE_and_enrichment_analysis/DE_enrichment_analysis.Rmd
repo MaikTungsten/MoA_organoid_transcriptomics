@@ -36,9 +36,9 @@ The dataset encompasses two cell states - Healthy and Glioma cells - subjected t
 Load the data. Note: the data has been subjected to prior inspection, cleaning and curation in a Jupyter Notebook.
 
 ```{r}
-countsLOG_in <- as.data.frame(read_csv("../post_processing_countData/Log2_normalized_countData_minus_outliers.csv"))
-countsRAW_in <- as.data.frame(read_csv("../post_processing_countData/Raw_countData_minus_outliers.csv"))
-countsTPM_in <- as.data.frame(read_csv("../post_processing_countData/TPM_normalized_countData_minus_outliers.csv"))
+countsLOG_in <- as.data.frame(read_csv("post_processing_countData/Log2_normalized_countData_minus_outliers.csv"))
+countsRAW_in <- as.data.frame(read_csv("post_processing_countData/Raw_countData_minus_outliers.csv"))
+countsTPM_in <- as.data.frame(read_csv("post_processing_countData/TPM_normalized_countData_minus_outliers.csv"))
 
 # Example: TPM data
 head(countsTPM_in)
@@ -61,7 +61,7 @@ head(countsTPM)
 #### Load annotation
 
 ```{r}
-anno <- as.data.frame(read_excel('../post_processing_countData/AW_RNAseq_2025.xlsx', sheet='Final_annotation'))
+anno <- as.data.frame(read_excel('post_processing_countData/AW_RNAseq_2025.xlsx', sheet='Final_annotation'))
 rownames(anno) <- c(anno$ID)
 head(anno)
 ```
