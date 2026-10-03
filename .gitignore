@@ -1,2 +1,4 @@
 .Rhistory
 *.pdf
+post_processing_countData/*.gff
+*.xlsx
